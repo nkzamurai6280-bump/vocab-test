@@ -246,6 +246,12 @@ dd { margin: 2px 0 0; font-size: 1.05rem; }
   #bar-fill { transition: none; }
 }
 
+.tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.tabs button { flex: 1; padding: 10px; }
+.tabs button[aria-selected="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+summary { cursor: pointer; font-weight: 600; }
+textarea { width: 100%; font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
+.card-word.long { font-size: clamp(1.4rem, 5.5vw, 2rem); }
 </style>
 </head>
 <body>
@@ -253,7 +259,20 @@ dd { margin: 2px 0 0; font-size: 1.05rem; }
 
   <!-- 設定画面 -->
   <section id="screen-setup" class="screen">
-    <h1>英単語ターゲット1900<span>英→日 書き込みテスト</span></h1>
+    <h1>英単語・英熟語ターゲット<span>英→日 書き込みテスト</span></h1>
+
+    <div class="tabs" id="mode-tabs" role="tablist">
+      <button type="button" role="tab" data-mode="word">英単語 1900</button>
+      <button type="button" role="tab" data-mode="idiom">英熟語 1000</button>
+    </div>
+
+    <details class="panel" id="idiom-import" hidden>
+      <summary>熟語データの取り込み（<span id="idiom-count">未取り込み</span>）</summary>
+      <p class="note">「英熟語ターゲット1000 熟語一覧」の表（No・熟語・意味）をコピーして、下に貼り付けてください。取り込んだデータはこの端末に保存されます。</p>
+      <textarea id="idiom-text" rows="6" placeholder="1  a piece of ～  １つの～&#10;2  a couple of ～  ２つの～、２，３の～"></textarea>
+      <div class="btn-row"><button type="button" class="primary" id="btn-idiom-import">取り込む</button></div>
+      <p class="note" id="idiom-status" role="status"></p>
+    </details>
 
     <div class="panel">
       <h2>テストの設定</h2>
@@ -385,11 +404,17 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   'use strict';
 
   const $ = (s) => document.querySelector(s);
-  const MAX_NO = WORDS.length; // 1900
-  const LS_WRONG = 'vt1900.wrong';
+  let MAX_NO = WORDS.length;
+  const LS_WORD = 'vt1900.wrong';
+  const LS_IDIOM_WRONG = 'vt1900.idiom.wrong';
+  const LS_IDIOM_DATA = 'vt1900.idiom.data';
+  const LS_MODE = 'vt1900.mode';
   const LS_SETTINGS = 'vt1900.settings';
+  let LS_WRONG = LS_WORD;
+  let MODE = 'word';
 
-  const byNo = new Map(WORDS.map((w) => [w.n, w]));
+  let DATA = WORDS;
+  let byNo = new Map(DATA.map((w) => [w.n, w]));
 
   /* ---------- 保存まわり ---------- */
   const load = (key, fallback) => {
@@ -435,7 +460,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   /* ---------- 自動判定 ---------- */
   // 意味の文字列から「正解になりうる語句」の候補を取り出す
   const LEADING_PARTICLES = /^[をにがとのへで]+/;
-  const normalize = (s) => s.replace(/[\s　～〜~]/g, '').replace(LEADING_PARTICLES, '');
+  const normalize = (s) => s.replace(/[\s　～〜~…]/g, '').replace(LEADING_PARTICLES, '');
 
   function candidates(meaning) {
     let s = meaning
@@ -443,10 +468,12 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
       .replace(/[（(][^）)]*[）)]/g, '')
       .replace(/〔[^〕]*〕/g, '')
       .replace(/【[^】]*】/g, '')
+      .replace(/\[[^\]]*\]/g, '')
+      .replace(/\s*=\s*[A-Za-z][^；，、]*/g, '')
       .replace(/[≒⇔][^；，、]*/g, '');
     const extra = [];
     s = s.replace(/［([^］]*)］/g, (_, inner) => { extra.push(inner); return ''; });
-    return s.split(/[；，、,]/).concat(extra)
+    return s.split(/[；，、,①-⑳]/).concat(extra)
       .map(normalize)
       .filter((c) => c.length > 0);
   }
@@ -481,6 +508,83 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     }, 3000);
   }
 
+  /* ---------- 単語／熟語モード ---------- */
+  const PRESETS = {
+    word: [[1, 500], [501, 1000], [1001, 1500], [1501, 1900], [1, 1900]],
+    idiom: [[1, 250], [251, 500], [501, 750], [751, 1000], [1, 1000]],
+  };
+  const settingsKey = () => LS_SETTINGS + (MODE === 'idiom' ? '.idiom' : '');
+
+  let IDIOMS = (() => {
+    const d = load(LS_IDIOM_DATA, []);
+    return Array.isArray(d) ? d.filter((x) => x && x.n && x.w && x.m) : [];
+  })();
+
+  // サイトの表（No・熟語・意味）をコピーしたテキストを読み取る
+  function parseIdioms(text) {
+    const KANA = /[\u3040-\u30ff\u4e00-\u9fff①-⑳（\uff10-\uff19]/;
+    const hasJa = (t) => t !== '比較級' && KANA.test(t);
+    const out = [];
+    text.split(/\r?\n/).forEach((raw) => {
+      const line = raw.replace(/\u00a0/g, ' ').trim();
+      if (!line) return;
+      let n = 0, w = '', mean = '', m;
+      if (line.includes('\t')) {
+        const p = line.split('\t').map((s) => s.trim()).filter(Boolean);
+        if (p.length >= 3 && /^\d+$/.test(p[0])) { n = +p[0]; w = p[1]; mean = p.slice(2).join(' '); }
+      } else if ((m = line.match(/^(\d{1,4})\s+(.+)$/))) {
+        const toks = m[2].split(/\s+/);
+        const k = toks.findIndex(hasJa);
+        if (k > 0) { n = +m[1]; w = toks.slice(0, k).join(' '); mean = toks.slice(k).join(' '); }
+      }
+      if (n && w && mean) out.push({ n, w, m: mean });
+      else if (out.length && !/^\d/.test(line) && KANA.test(line)) out[out.length - 1].m += ' ' + line;
+    });
+    const seen = new Set();
+    return out.filter((x) => !seen.has(x.n) && seen.add(x.n));
+  }
+
+  function setMode(m) {
+    MODE = m;
+    DATA = m === 'idiom' ? IDIOMS : WORDS;
+    byNo = new Map(DATA.map((x) => [x.n, x]));
+    MAX_NO = DATA.length ? Math.max(...DATA.map((x) => x.n)) : 0;
+    LS_WRONG = m === 'idiom' ? LS_IDIOM_WRONG : LS_WORD;
+    wrongSet = new Set(load(LS_WRONG, []).filter((n) => byNo.has(n)));
+    save(LS_MODE, m);
+    renderMode();
+  }
+
+  function renderMode() {
+    const idiom = MODE === 'idiom';
+    document.querySelectorAll('#mode-tabs button').forEach((b) =>
+      b.setAttribute('aria-selected', String(b.dataset.mode === MODE)));
+    $('#idiom-import').hidden = !idiom;
+    $('#idiom-count').textContent = IDIOMS.length ? `${IDIOMS.length}件` : '未取り込み';
+    if (idiom && !IDIOMS.length) $('#idiom-import').open = true;
+    $('#presets').innerHTML = PRESETS[MODE].map(([a, b], i, arr) =>
+      `<button type="button" data-from="${a}" data-to="${b}">${i === arr.length - 1 ? '全範囲' : a + '–' + b}</button>`).join('');
+    el.from.max = el.to.max = MAX_NO;
+    restoreSettings();
+    renderSetup();
+  }
+
+  $('#btn-idiom-import').addEventListener('click', () => {
+    const list = parseIdioms($('#idiom-text').value);
+    const st = $('#idiom-status');
+    if (list.length < 20) {
+      st.textContent = `読み取れたのは${list.length}件でした。表（No・熟語・意味）をそのままコピーして貼り付けてください。`;
+      return;
+    }
+    list.sort((a, b) => a.n - b.n);
+    IDIOMS = list;
+    save(LS_IDIOM_DATA, list);
+    st.textContent = `${list.length}件を取り込みました。`;
+    $('#idiom-text').value = '';
+    $('#idiom-import').open = false;
+    setMode('idiom');
+  });
+
   /* ---------- 設定画面 ---------- */
   const el = {
     from: $('#range-from'),
@@ -504,7 +608,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
 
   function updateRangeInfo() {
     const { size } = readRange();
-    el.info.textContent = `この範囲は ${size} 語です`;
+    el.info.textContent = DATA.length ? `この範囲は ${size} 件です` : '熟語データがありません';
     el.count.max = size;
   }
 
@@ -516,8 +620,12 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   }
 
   function restoreSettings() {
-    const s = load(LS_SETTINGS, null);
-    if (!s) return;
+    const s = load(settingsKey(), null);
+    if (!s) {
+      el.from.value = 1;
+      el.to.value = MAX_NO || 1;
+      return;
+    }
     el.from.value = s.from;
     el.to.value = s.to;
     el.count.value = s.count;
@@ -525,7 +633,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   }
 
   function saveSettings() {
-    save(LS_SETTINGS, {
+    save(settingsKey(), {
       from: +el.from.value, to: +el.to.value, count: +el.count.value, auto: el.auto.checked,
     });
   }
@@ -541,6 +649,10 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   });
 
   $('#btn-start').addEventListener('click', () => {
+    if (!DATA.length) {
+      el.error.textContent = '先に熟語データを取り込んでください。';
+      return;
+    }
     const { from, to, size } = readRange();
     let count = parseInt(el.count.value, 10);
     if (Number.isNaN(count) || count < 1) {
@@ -554,8 +666,8 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     el.count.value = count;
     saveSettings();
 
-    const pool = WORDS.filter((w) => w.n >= from && w.n <= to);
-    startQuiz(shuffle(pool).slice(0, count), `${from}〜${to}`);
+    const pool = DATA.filter((w) => w.n >= from && w.n <= to);
+    startQuiz(shuffle(pool).slice(0, count), `${MODE === 'idiom' ? '熟語 ' : ''}${from}〜${to}`);
   });
 
   $('#btn-retest-all').addEventListener('click', retestStored);
@@ -588,6 +700,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     $('#bar-fill').style.width = `${(quiz.i / quiz.list.length) * 100}%`;
     $('#card-no').textContent = `No. ${w.n}`;
     $('#card-word').textContent = w.w;
+    $('#card-word').classList.toggle('long', w.w.length > 14);
 
     $('#answer').value = '';
     $('#answer-area').hidden = false;
@@ -732,7 +845,11 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
   $('#btn-wrong-back').addEventListener('click', () => show('setup'));
 
   /* ---------- 起動 ---------- */
-  restoreSettings();
+  $('#mode-tabs').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-mode]');
+    if (b && b.dataset.mode !== MODE) setMode(b.dataset.mode);
+  });
+  setMode(load(LS_MODE, 'word'));
   show('setup');
 })();
 

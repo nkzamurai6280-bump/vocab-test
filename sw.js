@@ -1,5 +1,5 @@
 // オフライン用キャッシュ。アプリを更新したら VERSION の数字を上げる
-const VERSION = 'vt1900-v1';
+const VERSION = 'vt1900-v2';
 const FILES = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 
 self.addEventListener('install', (e) => {
