@@ -252,6 +252,12 @@ dd { margin: 2px 0 0; font-size: 1.05rem; }
 summary { cursor: pointer; font-weight: 600; }
 textarea { width: 100%; font: inherit; color: inherit; background: var(--paper); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; margin: 10px 0; }
 .card-word.long { font-size: clamp(1.4rem, 5.5vw, 2rem); }
+#timer { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+#timer-bar { flex: 1; height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+#timer-fill { height: 100%; width: 100%; background: var(--accent); }
+#timer-text { min-width: 3.2em; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+#timer.low #timer-fill { background: var(--ng); }
+#timer.low #timer-text { color: var(--ng); }
 </style>
 </head>
 <body>
@@ -302,6 +308,21 @@ textarea { width: 100%; font: inherit; color: inherit; background: var(--paper);
       </div>
 
       <div class="field">
+        <label for="time-limit">1問あたりの制限時間</label>
+        <div class="range-row">
+          <input type="number" id="time-limit" min="0" max="300" value="0">
+          <span class="note">秒（0なら制限なし）</span>
+        </div>
+        <div class="presets" id="time-presets">
+          <button type="button" data-time="0">なし</button>
+          <button type="button" data-time="5">5秒</button>
+          <button type="button" data-time="10">10秒</button>
+          <button type="button" data-time="15">15秒</button>
+          <button type="button" data-time="30">30秒</button>
+        </div>
+      </div>
+
+      <div class="field">
         <label class="check">
           <input type="checkbox" id="auto-judge" checked>
           入力した答えを自動で判定する（あとで手動で直せます）
@@ -336,6 +357,10 @@ textarea { width: 100%; font: inherit; color: inherit; background: var(--paper);
       <div class="card-word" id="card-word"></div>
 
       <div id="answer-area">
+        <div id="timer" hidden>
+          <div id="timer-bar"><div id="timer-fill"></div></div>
+          <span id="timer-text"></span>
+        </div>
         <input type="text" id="answer" autocomplete="off" autocapitalize="off" spellcheck="false"
                placeholder="日本語の意味を入力（Enterで判定）">
         <div class="btn-row">
@@ -591,6 +616,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     count: $('#count'),
     info: $('#range-info'),
     auto: $('#auto-judge'),
+    time: $('#time-limit'),
     error: $('#setup-error'),
   };
 
@@ -629,15 +655,21 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     el.to.value = s.to;
     el.count.value = s.count;
     el.auto.checked = s.auto !== false;
+    el.time.value = s.time || 0;
   }
 
   function saveSettings() {
     save(settingsKey(), {
-      from: +el.from.value, to: +el.to.value, count: +el.count.value, auto: el.auto.checked,
+      from: +el.from.value, to: +el.to.value, count: +el.count.value, auto: el.auto.checked, time: +el.time.value || 0,
     });
   }
 
   [el.from, el.to].forEach((i) => i.addEventListener('input', updateRangeInfo));
+
+  $('#time-presets').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-time]');
+    if (b) el.time.value = b.dataset.time;
+  });
 
   $('#presets').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-from]');
@@ -663,6 +695,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     el.from.value = from;
     el.to.value = to;
     el.count.value = count;
+    el.time.value = clamp(parseInt(el.time.value, 10) || 0, 0, 300);
     saveSettings();
 
     const pool = DATA.filter((w) => w.n >= from && w.n <= to);
@@ -684,9 +717,32 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
       phase: 'answer',
       cur: null,
       auto: el.auto.checked,
+      limit: clamp(parseInt(el.time.value, 10) || 0, 0, 300),
     };
     show('quiz');
     renderQuestion();
+  }
+
+  let timerId = null;
+  function stopTimer() {
+    if (timerId) { clearInterval(timerId); timerId = null; }
+  }
+  function startTimer() {
+    stopTimer();
+    const box = $('#timer');
+    if (!quiz.limit) { box.hidden = true; return; }
+    box.hidden = false;
+    const total = quiz.limit * 1000;
+    const end = Date.now() + total;
+    const tick = () => {
+      const left = Math.max(0, end - Date.now());
+      $('#timer-fill').style.width = `${(left / total) * 100}%`;
+      $('#timer-text').textContent = `${Math.ceil(left / 1000)}秒`;
+      box.classList.toggle('low', left <= 3000);
+      if (left <= 0) { stopTimer(); submitAnswer(false, true); }
+    };
+    tick();
+    timerId = setInterval(tick, 100);
   }
 
   function renderQuestion() {
@@ -705,15 +761,17 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     $('#answer-area').hidden = false;
     $('#feedback').hidden = true;
     $('#answer').focus();
+    startTimer();
   }
 
-  function submitAnswer(skipped) {
+  function submitAnswer(skipped, timedOut) {
     if (quiz.phase !== 'answer') return;
+    stopTimer();
     const w = quiz.list[quiz.i];
     const input = skipped ? '' : $('#answer').value.trim();
     const ok = skipped ? false : (quiz.auto ? autoJudge(input, w.m) : false);
 
-    quiz.cur = { word: w, input, ok, manual: !quiz.auto && !skipped };
+    quiz.cur = { word: w, input, ok, manual: !quiz.auto && !skipped, timedOut: !!timedOut };
     quiz.phase = 'feedback';
 
     $('#answer-area').hidden = true;
@@ -731,7 +789,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     const label = manual
       ? (ok ? '正解にしました' : '不正解（意味を見て、合っていれば判定を変更）')
       : (ok ? '正解' : '不正解');
-    v.innerHTML = `<span class="mark">${ok ? '○' : '×'}</span><span>${label}</span>`;
+    v.innerHTML = `<span class="mark">${ok ? '○' : '×'}</span><span>${quiz.cur.timedOut ? '時間切れ・' : ''}${label}</span>`;
     $('#btn-toggle').textContent = ok ? '不正解に変更する' : '正解に変更する';
   }
 
@@ -759,7 +817,7 @@ const WORDS = [{"n":1,"w":"create","m":"を創り出す；を引き起こす"},{
     renderVerdict();
   });
   $('#btn-quit').addEventListener('click', (e) => {
-    confirmTwice(e.currentTarget, 'もう一度押すと中断します', () => show('setup'));
+    confirmTwice(e.currentTarget, 'もう一度押すと中断します', () => { stopTimer(); show('setup'); });
   });
 
   // Enterキーの処理（IME変換確定のEnterは無視する）
